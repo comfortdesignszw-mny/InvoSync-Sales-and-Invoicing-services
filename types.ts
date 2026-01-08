@@ -4,8 +4,8 @@ export interface BusinessProfile {
   address: string;
   email: string;
   phone: string;
-  whatsappPhone: string; // Target for WhatsApp orders
-  logo: string; // Base64 string for the logo
+  whatsappPhone: string;
+  logo: string;
   taxRate: number;
 }
 
@@ -78,6 +78,8 @@ export interface AppState {
   quotes: Quote[];
   cart: LineItem[];
 }
+
+export type SyncStatus = 'saved' | 'saving' | 'error' | 'offline' | 'loading';
 
 export type Action =
   | { type: 'SET_STATE'; payload: AppState }

@@ -1,11 +1,9 @@
 
 import React, { createContext, useReducer, useContext, useEffect, ReactNode, useState, useRef } from 'react';
-import { AppState, Action, DocumentType, LineItem } from '../types.ts';
+import { AppState, Action, DocumentType, LineItem, SyncStatus } from '../types.ts';
 import { INITIAL_STATE } from '../constants.ts';
 import { useAuth } from './useAuth.tsx';
 import { dbService } from '../services/dbService.ts';
-
-type SyncStatus = 'saved' | 'saving' | 'error' | 'loading';
 
 const StoreContext = createContext<{ 
   state: AppState; 
@@ -115,69 +113,80 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
   const [state, dispatch] = useReducer(appReducer, INITIAL_STATE);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('loading');
   const [lastSaved, setLastSaved] = useState<string | null>(null);
-  const isLoadedRef = useRef(false);
-  const saveTimeoutRef = useRef<number | null>(null);
+  
+  const isHydrated = useRef(false);
+  const syncChannel = useRef<BroadcastChannel | null>(null);
+  const saveDebounceTimer = useRef<number | null>(null);
 
-  // Initial Load & Cross-Tab Sync
+  // 1. Initialize Sync Channel and Load Data
   useEffect(() => {
-    const fetchData = async () => {
-      if (user) {
-        setSyncStatus('loading');
-        let savedState = await dbService.loadState(user.id);
+    if (!user) {
+      dispatch({ type: 'SET_STATE', payload: INITIAL_STATE });
+      isHydrated.current = false;
+      return;
+    }
+
+    // Initialize Broadcast Channel for multi-tab real-time sync
+    syncChannel.current = new BroadcastChannel(`invosync_cloud_sync_${user.id}`);
+    syncChannel.current.onmessage = (event) => {
+      if (event.data.type === 'SYNC_STATE') {
+        dispatch({ type: 'SET_STATE', payload: event.data.payload });
+        setLastSaved(new Date().toLocaleTimeString());
+      }
+    };
+
+    const hydrateFromCloud = async () => {
+      setSyncStatus('loading');
+      try {
+        const cloudData = await dbService.loadState(user.id);
         
-        // Auto-initialize profile if it's new
-        if (!savedState.profile.email || savedState.profile.name === 'Your Company') {
-          savedState = {
-            ...savedState,
-            profile: {
-              ...savedState.profile,
-              name: savedState.profile.name === 'Your Company' ? user.name : savedState.profile.name,
-              email: savedState.profile.email || user.email,
-            }
-          };
+        // Auto-initialize profile with registration info if it's the first time
+        if (cloudData.profile.name === 'Your Company') {
+          cloudData.profile.name = user.name;
+          cloudData.profile.email = user.email;
         }
 
-        dispatch({ type: 'SET_STATE', payload: savedState });
-        isLoadedRef.current = true;
+        dispatch({ type: 'SET_STATE', payload: cloudData });
+        isHydrated.current = true;
         setSyncStatus('saved');
         setLastSaved(new Date().toLocaleTimeString());
-      } else {
-        dispatch({ type: 'SET_STATE', payload: INITIAL_STATE });
-        isLoadedRef.current = false;
-        setSyncStatus('loading');
+      } catch (err) {
+        console.error("Cloud hydration failed", err);
+        setSyncStatus('error');
       }
     };
 
-    fetchData();
+    hydrateFromCloud();
 
-    // Listen for storage changes in other tabs for "Real-time" feel
-    const handleStorageChange = (e: StorageEvent) => {
-      if (user && e.key === `invosync_db_${user.id}`) {
-        fetchData();
-      }
+    return () => {
+      syncChannel.current?.close();
     };
-    window.addEventListener('storage', handleStorageChange);
-    return () => window.removeEventListener('storage', handleStorageChange);
   }, [user]);
 
-  // Persist State Changes
+  // 2. Real-time Persistence Effect
   useEffect(() => {
-    if (user && isLoadedRef.current) {
-      setSyncStatus('saving');
-      
-      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
-      
-      saveTimeoutRef.current = window.setTimeout(async () => {
-        try {
-          await dbService.saveState(user.id, state);
-          setSyncStatus('saved');
-          setLastSaved(new Date().toLocaleTimeString());
-        } catch (e) {
-          console.error("Failed to sync", e);
-          setSyncStatus('error');
-        }
-      }, 1000); // Debounce saves to optimize performance
+    if (!user || !isHydrated.current) return;
+
+    // Local multi-tab notification
+    syncChannel.current?.postMessage({ type: 'SYNC_STATE', payload: state });
+
+    // Cloud persistence (Simulated)
+    setSyncStatus('saving');
+    
+    if (saveDebounceTimer.current) {
+      window.clearTimeout(saveDebounceTimer.current);
     }
+
+    saveDebounceTimer.current = window.setTimeout(async () => {
+      try {
+        await dbService.saveState(user.id, state);
+        setSyncStatus('saved');
+        setLastSaved(new Date().toLocaleTimeString());
+      } catch (err) {
+        setSyncStatus('error');
+      }
+    }, 800); // 800ms debounce for "Real-time" feel without thrashing the "API"
+
   }, [state, user]);
 
   return React.createElement(StoreContext.Provider, { 
